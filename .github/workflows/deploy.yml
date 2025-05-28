@@ -1,0 +1,119 @@
+name: Deploy Dashboard Summarization to GCP
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+env:
+  TF_VERSION: '1.5.0'
+  GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+  GCP_REGION: 'us-central1'
+
+jobs:
+  terraform-plan:
+    name: Terraform Plan
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_version: ${{ env.TF_VERSION }}
+
+    - name: Authenticate to GCP
+      uses: google-github-actions/auth@v2
+      with:
+        credentials_json: ${{ secrets.GCP_SERVICE_ACCOUNT_KEY }}
+
+    - name: Setup GCP CLI
+      uses: google-github-actions/setup-gcloud@v2
+
+    - name: Terraform Init
+      working-directory: ./terraform
+      run: terraform init
+
+    - name: Terraform Validate
+      working-directory: ./terraform
+      run: terraform validate
+
+    - name: Terraform Plan
+      working-directory: ./terraform
+      run: terraform plan -no-color
+      env:
+        TF_VAR_project_id: ${{ env.GCP_PROJECT_ID }}
+        TF_VAR_region: ${{ env.GCP_REGION }}
+
+  terraform-apply:
+    name: Terraform Apply
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_version: ${{ env.TF_VERSION }}
+
+    - name: Authenticate to GCP
+      uses: google-github-actions/auth@v2
+      with:
+        credentials_json: ${{ secrets.GCP_SERVICE_ACCOUNT_KEY }}
+
+    - name: Setup GCP CLI
+      uses: google-github-actions/setup-gcloud@v2
+
+    - name: Terraform Init
+      working-directory: ./terraform
+      run: terraform init
+
+    - name: Terraform Apply
+      working-directory: ./terraform
+      run: terraform apply -auto-approve
+      env:
+        TF_VAR_project_id: ${{ env.GCP_PROJECT_ID }}
+        TF_VAR_region: ${{ env.GCP_REGION }}
+
+  deploy-cloud-run:
+    name: Deploy to Cloud Run
+    runs-on: ubuntu-latest
+    needs: terraform-apply
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Authenticate to GCP
+      uses: google-github-actions/auth@v2
+      with:
+        credentials_json: ${{ secrets.GCP_SERVICE_ACCOUNT_KEY }}
+
+    - name: Setup GCP CLI
+      uses: google-github-actions/setup-gcloud@v2
+
+    - name: Configure Docker for GCR
+      run: gcloud auth configure-docker
+
+    - name: Build and Push Docker Image
+      working-directory: ./restful-service
+      run: |
+        docker build -t gcr.io/${{ env.GCP_PROJECT_ID }}/dashboard-summarization:${{ github.sha }} .
+        docker push gcr.io/${{ env.GCP_PROJECT_ID }}/dashboard-summarization:${{ github.sha }}
+
+    - name: Deploy to Cloud Run
+      run: |
+        gcloud run deploy dashboard-summarization \
+          --image gcr.io/${{ env.GCP_PROJECT_ID }}/dashboard-summarization:${{ github.sha }} \
+          --platform managed \
+          --region ${{ env.GCP_REGION }} \
+          --allow-unauthenticated \
+          --set-env-vars="NODE_ENV=production"
